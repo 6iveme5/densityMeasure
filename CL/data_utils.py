@@ -1,0 +1,97 @@
+import numpy as np
+import os
+import re
+import pandas as pd
+
+# 适配 densityMeasure/CL/ 脚本，数据在 densityMeasure/Data/
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(os.path.dirname(CURRENT_DIR), 'Data')
+CLDATA_DIR = os.path.join(DATA_DIR, 'CLData')  # 新增
+
+def load_and_clean_data(data_dir=DATA_DIR, cldata_dir=CLDATA_DIR):
+    def _read_csv(path):
+        return pd.read_csv(path)
+
+    def _clean_dataframe(df):
+        df = df.copy()
+        # 日期解析
+        for col in ['requestDate', 'admissionDate']:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], dayfirst=True, errors='coerce')
+
+        def extract_bp(bp_str):
+            match = re.match(r'(\d{2,3})[xX](\d{2,3})', str(bp_str).replace(" ", ""))
+            if match:
+                sbp, dbp = int(match.group(1)), int(match.group(2))
+                if 60 <= sbp <= 250 and 40 <= dbp <= 150:
+                    return sbp, dbp
+            return np.nan, np.nan
+
+        if 'blodPressure' in df.columns:
+            df['SBP'], df['DBP'] = zip(*df['blodPressure'].apply(extract_bp))
+            df.drop(columns=['blodPressure'], inplace=True)
+
+        if 'glasgowScale' in df.columns:
+            df['glasgowScale'] = pd.to_numeric(df['glasgowScale'], errors='coerce')
+            df['glasgowScale_missing'] = df['glasgowScale'].isna().astype(int)
+            median_val = df['glasgowScale'].median(skipna=True)
+            df['glasgowScale'] = df['glasgowScale'].fillna(median_val)
+
+        for col, (low, high) in {
+            'creatinine': (0, 10),
+            'urea': (0, 100),
+            'platelets': (1, 1000),
+            'diuresis': (1, 5000),
+        }.items():
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+                df[col] = df[col].apply(lambda x: x if low <= x <= high else np.nan)
+
+        if 'lengthofStay' in df.columns:
+            df['lengthofStay'] = pd.to_numeric(df['lengthofStay'], errors='coerce')
+            df = df[(df['lengthofStay'] > 0) & (df['lengthofStay'] <= 365)]
+
+        if 'outcomeType' in df.columns:
+            df['outcomeType'] = df['outcomeType'].astype(str).str.lower().map({'survival': 1, 'death': 0})
+
+        drop_cols = [
+            'patientFfederalUnit', 'icdCode', 'requestDate', 'admissionDate',
+            'requestType', 'requestBedType', 'admissionBedType', 'admissionHealthUnit'
+        ]
+        df.drop(columns=[col for col in drop_cols if col in df.columns], inplace=True)
+
+        for col in df.select_dtypes(include='object').columns:
+            df[col] = pd.factorize(df[col])[0]
+
+        cols = list(df.columns)
+        for col in ['lengthofStay', 'outcomeType']:
+            if col in cols:
+                cols.remove(col)
+                cols.append(col)
+        df = df[cols]
+
+        df.dropna(inplace=True)
+        df.reset_index(drop=True, inplace=True)
+        return df
+
+    train_path = os.path.join(data_dir, 'trainData.csv')
+    val_path = os.path.join(data_dir, 'valData.csv')
+
+    print("读取训练数据文件路径：", train_path)
+    print("读取验证数据文件路径：", val_path)
+
+    train_df = _read_csv(train_path)
+    val_df = _read_csv(val_path)
+
+    train_df = _clean_dataframe(train_df)
+    val_df = _clean_dataframe(val_df)
+
+    # 新增：创建 CLData 子文件夹
+    os.makedirs(cldata_dir, exist_ok=True)
+    train_df.to_csv(os.path.join(cldata_dir, 'trainData_cleaned.csv'), index=False)
+    val_df.to_csv(os.path.join(cldata_dir, 'valData_cleaned.csv'), index=False)
+
+    return train_df, val_df
+
+if __name__ == '__main__':
+    load_and_clean_data()
